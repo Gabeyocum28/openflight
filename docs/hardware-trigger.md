@@ -29,7 +29,17 @@ The host configures the radar once and then waits for the radar’s completed ro
    and the configured `S#n` split.
 5. Restore the magnitude gate `SMn`, then restore the requested `ST-n` last and allow the 4,096-sample history to fill.
 6. Wait for the board-triggered dump, parse the I/Q payload, and reject it if it has no outbound ball-speed reading at or above 35 mph.
-7. Re-arm with the same temporary guard around `GC`, restore the cached settings, and wait for the buffer to fill again. A serial write timeout keeps the capture and reports a retryable re-arm failure instead of discarding the shot.
+7. Re-arm with `PA`. After a dump the board drops to idle power mode with every
+   detector setting intact, so `PA` alone resumes sampling. Re-arming with `GC`
+   would reset those settings, and motion during the rebuild can fire an
+   unguarded trigger whose dump is lost, leaving the board idle with nothing to
+   re-arm it. Serial input is never cleared once the board is live: a dump can
+   start immediately, and output before its capture marker is skipped. A serial
+   write timeout keeps the capture and reports a retryable re-arm failure
+   instead of discarding the shot.
+8. If the tail of a dump arrives without its start (its head was discarded by
+   an unrelated command), treat the board as idle and re-arm it with `PA`. The
+   session log records these as `orphaned_dump` trigger rejections.
 
 The implementation is intentionally limited to the OPS243 trigger path; the
 experimental analysis and UI work remain outside this focused change.
@@ -71,12 +81,21 @@ The internal trigger does not depend on the SEN-14262 sound edge. Existing sound
 
 ## Raspberry Pi retest checklist
 
-Before treating a PR as ready for merge, run the hardware path on the target Pi and record the observations in the PR body:
+Before treating a change to this mode as ready for merge, run the hardware path
+on the target Pi and record the observations in the PR body:
+
+```bash
+scripts/start-kiosk.sh --trigger hardware
+```
+
+- Representative ball strikes: how many triggered, parsed, and re-armed.
+- Practice swings without a ball, and ambient motion with no swing, for false
+  triggers.
+- Rapid repeated motion past the radar for 15–20 seconds. The board must keep
+  re-arming; a blue LED that stays lit means it is idle and was never re-armed.
 
 Also run the unchanged sound path with the same representative shots:
 
 ```bash
 scripts/start-kiosk.sh --trigger sound
 ```
-
-I was unable to regression test the sound trigger.

@@ -588,7 +588,7 @@ class TestHardwareTriggeredCapture:
         )
 
     def test_accepts_ball_capture_and_rearms_after_parsing(self):
-        """A valid board dump is parsed before GC re-arm and returned."""
+        """A valid board dump is parsed before re-arm and returned."""
         radar = MagicMock()
         radar.wait_for_hardware_trigger.return_value = '{"Q": [1]}'
         radar.last_hardware_trigger_first_byte_timestamp = 12345.678
@@ -651,6 +651,44 @@ class TestHardwareTriggeredCapture:
         )
 
         assert HardwareTriggeredCapture().wait_for_trigger(radar, processor) is capture
+
+    def test_waits_without_discarding_input_and_detects_orphaned_dumps(self):
+        """The board may already be dumping when the wait starts."""
+        radar = MagicMock()
+        radar.wait_for_hardware_trigger.return_value = ""
+        radar.last_hardware_trigger_orphaned_dump = False
+
+        HardwareTriggeredCapture().wait_for_trigger(radar, MagicMock(), timeout=7.0)
+
+        radar.wait_for_hardware_trigger.assert_called_once_with(
+            timeout=7.0,
+            discard_pending_input=False,
+            detect_orphaned_dump=True,
+        )
+
+    def test_idle_timeout_does_not_rearm(self):
+        """A quiet timeout leaves the armed board alone so no shot is missed."""
+        radar = MagicMock()
+        radar.wait_for_hardware_trigger.return_value = ""
+        radar.last_hardware_trigger_orphaned_dump = False
+
+        trigger = HardwareTriggeredCapture()
+
+        assert trigger.wait_for_trigger(radar, MagicMock(), timeout=1.0) is None
+        radar.rearm_internal_speed_trigger.assert_not_called()
+        assert trigger.drain_diagnostics() == []
+
+    def test_orphaned_dump_rearms_idle_board(self):
+        """A dump that lost its head still leaves the board idle; re-arm it."""
+        radar = MagicMock()
+        radar.wait_for_hardware_trigger.return_value = ""
+        radar.last_hardware_trigger_orphaned_dump = True
+
+        trigger = HardwareTriggeredCapture()
+
+        assert trigger.wait_for_trigger(radar, MagicMock(), timeout=1.0) is None
+        radar.rearm_internal_speed_trigger.assert_called_once_with(30)
+        assert trigger.drain_diagnostics()[0]["reason"] == "orphaned_dump"
 
 
 class TestSoundTriggerTimestampPropagation:

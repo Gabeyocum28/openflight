@@ -726,8 +726,21 @@ class HardwareTriggeredCapture(TriggerStrategy):
             timeout,
         )
 
-        response = radar.wait_for_hardware_trigger(timeout=timeout)
+        response = radar.wait_for_hardware_trigger(
+            timeout=timeout,
+            discard_pending_input=False,
+            detect_orphaned_dump=True,
+        )
         if not response:
+            if getattr(radar, "last_hardware_trigger_orphaned_dump", False) is True:
+                started_at = time.time()
+                self._rearm(radar)
+                self._append_diagnostic(
+                    accepted=False,
+                    reason="orphaned_dump",
+                    trigger_latency_ms=(time.time() - started_at) * 1000.0,
+                )
+                return None
             logger.info("[TRIGGER] OPS hardware trigger timeout — no dump received")
             return None
 
@@ -749,11 +762,7 @@ class HardwareTriggeredCapture(TriggerStrategy):
             parse_error = error
             logger.warning("[TRIGGER] Hardware capture parse failed: %s", error, exc_info=True)
         finally:
-            try:
-                rearmed = radar.rearm_internal_speed_trigger(self.sample_rate_ksps)
-            except Exception as error:  # pylint: disable=broad-exception-caught
-                rearmed = False
-                logger.warning("[TRIGGER] Internal trigger re-arm failed: %s", error, exc_info=True)
+            rearmed = self._rearm(radar)
 
         trigger_latency_ms = (time.time() - started_at) * 1000.0
         if not rearmed:
@@ -791,6 +800,14 @@ class HardwareTriggeredCapture(TriggerStrategy):
             max(valid_outbound),
         )
         return capture
+
+    def _rearm(self, radar: "OPS243Radar") -> bool:
+        """Re-arm the board after a dump; failures are logged, never raised."""
+        try:
+            return radar.rearm_internal_speed_trigger(self.sample_rate_ksps)
+        except Exception as error:  # pylint: disable=broad-exception-caught
+            logger.warning("[TRIGGER] Internal trigger re-arm failed: %s", error, exc_info=True)
+            return False
 
     def reset(self):
         """Reset trigger state; the radar owns the armed state."""
