@@ -383,12 +383,12 @@ and its four cells come to $32, so the battery line is $116 gross and
 changes: the X1206 V2.0 carries its four 21700 holders on the board, uses the
 same power-button header, and takes the same 12 V adapter.
 
-If the [PR #221](https://github.com/open-flight/openflight/pull/221) internal
-trigger lands, the Sound Trigger line ($18) becomes optional and drops out of
-every total above for a radar that already reports firmware 1.3.2. For one that
-arrived with 1.3.1 or older, the swap instead costs the ~$76 J-Link EDU Mini
-listed under [Internal Trigger Instead](#internal-trigger-instead-pr-221), a
-one-off tool that flashes the 1.3.2 firmware.
+With the internal hardware trigger, the Sound Trigger line ($18) becomes
+optional and drops out of every total above for a radar that already reports
+firmware 1.3.2. For one that arrived with 1.3.1 or older, the swap instead costs
+the ~$76 J-Link EDU Mini listed under
+[Internal Hardware Trigger](#internal-hardware-trigger), a one-off tool that
+flashes the 1.3.2 firmware.
 
 OpenFlight works without any angle radar: you get ball speed, club speed, smash
 factor, spin rate, and estimated carry. The angle radar adds measured launch
