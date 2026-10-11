@@ -1352,10 +1352,75 @@ class TestShotToDict:
             host_timestamp_ns=np.arange(8, dtype=np.int64),
             trigger_host_timestamp_ns=np.int64(3),
         )
+        monkeypatch.setattr(ball_flight, "estimate_horizontal_launch", fake_estimate)
+        monkeypatch.setattr(
+            server_module,
+            "iwr6843_runtime",
+            SimpleNamespace(
+                calibration=SimpleNamespace(
+                    tee_range_m=1.524,
+                    radar_height_m=0.15875,
+                    tee_ball_height_m=0.04,
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            server_module,
+            "camera_capture_config",
+            {
+                "shot_analysis_enabled": True,
+                "mount_height_m": 0.20955,
+                "lateral_offset_m": 0.0762,
+                "horizontal_offset_deg": -0.45,
+                "roll_correction_deg": 2.8,
+                "mirror_horizontal": True,
+                "width": 640,
+                "height": 400,
+            },
+        )
+        shot = Shot(
+            ball_speed_mph=110.0,
+            timestamp=datetime.now(),
+            launch_angle_vertical=32.0,
+            launch_angle_vertical_source="radar",
+            launch_angle_horizontal=17.9,
+            launch_angle_horizontal_confidence=0.8,
+            launch_angle_horizontal_source="radar",
+            iwr6843_horizontal_deg=17.9,
+            iwr6843_horizontal_confidence=0.8,
+            iwr6843_ball_range_evidence=object(),
+        )
+        capture = SimpleNamespace(valid=True, path=tmp_path)
+
+        reference_ball = object()
+        server_module._fuse_camera_ball_flight(shot, capture, reference_ball=reference_ball)
+
+        assert shot.launch_angle_horizontal == 0.6
+        assert shot.launch_angle_horizontal_source == "camera_assisted_experimental"
+        assert shot.experimental_camera_horizontal_status == "camera_assisted_high"
+        assert shot.iwr6843_horizontal_deg == 17.9
+        assert estimate_call["geometry"].horizontal_offset_deg == -0.45
+        assert estimate_call["geometry"].camera_lateral_offset_m == 0.0762
+        assert estimate_call["geometry"].roll_correction_deg == 2.8
+        assert estimate_call["geometry"].horizontal_pixel_sign == -1.0
+        assert estimate_call["reference_ball"] is reference_ball
+        assert estimate_call["vertical_deg"] == 32.0
+        assert estimate_call["vertical_source"] == "radar"
+
+    def test_legacy_camera_fusion_remains_default(self, monkeypatch, tmp_path):
+        from openflight.camera import ball_flight
+
+        estimate_call = {}
+
+        def fake_legacy_estimate(*_args, **kwargs):
+            estimate_call.update(kwargs)
+            return ball_flight.CameraBallEstimate(status="rejected_track_support")
+
+        monkeypatch.setattr(ball_flight, "estimate_camera_ball_flight", fake_legacy_estimate)
         monkeypatch.setattr(
             ball_flight,
-            "estimate_camera_ball_flight",
-            fake_estimate,
+            "estimate_horizontal_launch",
+            lambda *_args, **_kwargs: pytest.fail("opt-in estimator should not run"),
         )
         monkeypatch.setattr(
             server_module,
@@ -1373,43 +1438,33 @@ class TestShotToDict:
             "camera_capture_config",
             {
                 "mount_height_m": 0.20955,
-                "lateral_offset_m": 0.0762,
-                "horizontal_offset_deg": -0.45,
-                "roll_correction_deg": 2.8,
-                "mirror_horizontal": True,
                 "width": 640,
                 "height": 400,
             },
         )
-        ball_flight_tracker = object()
-        monkeypatch.setattr(
-            server_module,
-            "camera_ball_flight_reference_tracker",
-            ball_flight_tracker,
-        )
+        tracker = object()
+        monkeypatch.setattr(server_module, "camera_ball_flight_reference_tracker", tracker)
+        archive = {
+            "frames": np.zeros((8, 4, 4), dtype=np.uint8),
+            "host_timestamp_ns": np.arange(8, dtype=np.int64),
+            "trigger_host_timestamp_ns": np.int64(3),
+        }
+        (tmp_path / "frames.npz").touch()
+        range_evidence = object()
         shot = Shot(
             ball_speed_mph=110.0,
             timestamp=datetime.now(),
-            launch_angle_horizontal=17.9,
-            launch_angle_horizontal_confidence=0.8,
-            launch_angle_horizontal_source="radar",
-            iwr6843_horizontal_deg=17.9,
-            iwr6843_horizontal_confidence=0.8,
-            iwr6843_ball_range_evidence=object(),
+            iwr6843_ball_range_evidence=range_evidence,
         )
-        capture = SimpleNamespace(valid=True, path=tmp_path)
 
-        server_module._fuse_camera_ball_flight(shot, capture)
+        server_module._fuse_camera_ball_flight(
+            shot,
+            SimpleNamespace(valid=True, path=tmp_path),
+            archive,
+        )
 
-        assert shot.launch_angle_horizontal == 0.6
-        assert shot.launch_angle_horizontal_source == "camera_assisted_experimental"
-        assert shot.experimental_camera_horizontal_status == "camera_assisted_high"
-        assert shot.iwr6843_horizontal_deg == 17.9
-        assert estimate_call["geometry"].horizontal_offset_deg == -0.45
-        assert estimate_call["geometry"].camera_lateral_offset_m == 0.0762
-        assert estimate_call["geometry"].roll_correction_deg == 2.8
-        assert estimate_call["geometry"].horizontal_pixel_sign == -1.0
-        assert estimate_call["ball_tracker"] is ball_flight_tracker
+        assert estimate_call["range_evidence"] is range_evidence
+        assert estimate_call["ball_tracker"] is tracker
 
     def test_live_fusion_without_camera_preserves_radar_horizontal(self):
         shot = Shot(
@@ -1433,6 +1488,11 @@ class TestShotToDict:
 
     def test_live_camera_fusion_loads_capture_archive_once(self, monkeypatch, tmp_path):
         """Horizontal and club delivery should share one NPZ decode per shot."""
+        monkeypatch.setattr(
+            server_module,
+            "camera_capture_config",
+            {"shot_analysis_enabled": True},
+        )
         np.savez(
             tmp_path / "frames.npz",
             frames=np.zeros((8, 4, 4), dtype=np.uint8),
@@ -1450,24 +1510,76 @@ class TestShotToDict:
 
         monkeypatch.setattr(np, "load", counted_load)
         fused_archives = []
+        reference_ball = object()
+        monkeypatch.setattr(
+            "openflight.camera.club_motion.detect_impact_reference_ball",
+            lambda *_args, **_kwargs: reference_ball,
+        )
         monkeypatch.setattr(
             server_module,
             "_fuse_camera_ball_flight",
-            lambda _shot, _capture, archive: fused_archives.append(archive),
+            lambda _shot, _capture, archive, *, reference_ball: fused_archives.append(
+                (archive, reference_ball)
+            ),
         )
         monkeypatch.setattr(
             server_module,
             "_fuse_camera_club_delivery",
-            lambda _shot, _capture, archive: fused_archives.append(archive),
+            lambda _shot, _capture, archive, *, reference_ball: fused_archives.append(
+                (archive, reference_ball)
+            ),
         )
         shot = Shot(ball_speed_mph=100.0, timestamp=datetime.now())
 
-        server_module._fuse_camera_measurements(shot, capture)
+        elapsed_ms = server_module._fuse_camera_measurements(shot, capture)
 
         assert loads == [tmp_path / "frames.npz"]
         assert len(fused_archives) == 2
-        assert fused_archives[0] is fused_archives[1]
-        assert fused_archives[0]["frames"].shape == (8, 4, 4)
+        assert fused_archives[0][0] is fused_archives[1][0]
+        assert fused_archives[0][0]["frames"].shape == (8, 4, 4)
+        assert fused_archives[0][1] is reference_ball
+        assert fused_archives[1][1] is reference_ball
+        assert elapsed_ms >= 0.0
+
+    def test_live_camera_fusion_continues_when_impact_anchor_fails(self, monkeypatch):
+        monkeypatch.setattr(
+            server_module,
+            "camera_capture_config",
+            {"shot_analysis_enabled": True},
+        )
+        archive = {
+            "frames": np.zeros((20, 4, 4), dtype=np.uint8),
+            "host_timestamp_ns": np.arange(20, dtype=np.int64),
+            "trigger_host_timestamp_ns": np.int64(10),
+        }
+        monkeypatch.setattr(server_module, "_load_camera_capture_archive", lambda _capture: archive)
+        monkeypatch.setattr(
+            "openflight.camera.club_motion.detect_impact_reference_ball",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("opencv unavailable")),
+        )
+        reference_balls = []
+        monkeypatch.setattr(
+            server_module,
+            "_fuse_camera_ball_flight",
+            lambda _shot, _capture, _archive, *, reference_ball: reference_balls.append(
+                reference_ball
+            ),
+        )
+        monkeypatch.setattr(
+            server_module,
+            "_fuse_camera_club_delivery",
+            lambda _shot, _capture, _archive, *, reference_ball: reference_balls.append(
+                reference_ball
+            ),
+        )
+
+        elapsed_ms = server_module._fuse_camera_measurements(
+            Shot(ball_speed_mph=100.0, timestamp=datetime.now()),
+            SimpleNamespace(valid=True),
+        )
+
+        assert reference_balls == [None, None]
+        assert elapsed_ms >= 0.0
 
     def test_live_camera_fusion_withholds_dark_frames_and_preserves_iwr(self, monkeypatch):
         runtime = SimpleNamespace(camera_analysis_eligible=False)
@@ -2914,7 +3026,8 @@ class TestOnShotDetected:
             server_module,
             "_enrich_shot_from_optional_hardware",
             lambda shot: (
-                enrichment_calls.append(shot.timestamp) or server_module._ShotEnrichmentResult()
+                enrichment_calls.append(shot.timestamp)
+                or server_module._ShotEnrichmentResult(camera_analysis_ms=123.45)
             ),
         )
 
@@ -2925,6 +3038,7 @@ class TestOnShotDetected:
 
         assert enrichment_calls == [shot.timestamp]
         self._assert_finalized_once(emitted, session_log)
+        assert session_log.shots[0]["pipeline_ms"]["camera_analysis"] == 123.5
 
     def test_camera_only_enrichment_uses_provisional_then_final_events(self, monkeypatch):
         emitted = []
@@ -4038,6 +4152,37 @@ class TestOnShotDetected:
         assert shot.launch_angle_vertical == pytest.approx(20.5)
         assert shot.launch_angle_horizontal == pytest.approx(0.0)
 
+    def test_ble_publish_survives_websocket_failure(self, monkeypatch):
+        """A broken web client must not suppress the independent BLE transport."""
+        published = []
+        publisher = SimpleNamespace(
+            publish_shot=lambda shot_data, **_kwargs: published.append(shot_data)
+        )
+
+        monkeypatch.setattr(server_module, "monitor", None)
+        monkeypatch.setattr(server_module, "sim_connectors", [])
+        monkeypatch.setattr(server_module, "ble_publisher", publisher)
+        monkeypatch.setattr(server_module, "debug_mode", False)
+        monkeypatch.setattr(server_module, "get_session_logger", lambda: None)
+        monkeypatch.setattr(
+            server_module.socketio,
+            "emit",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("socket closed")),
+        )
+
+        shot = Shot(
+            ball_speed_mph=100.0,
+            timestamp=datetime.now(),
+            club=ClubType.IRON_7,
+            mode="mock",
+        )
+
+        on_shot_detected(shot)
+        _wait_for_shot_finalization_idle()
+
+        assert len(published) == 1
+        assert published[0]["ball_speed_mph"] == 100.0
+
     def test_implausible_club_aoa_is_rejected(self, monkeypatch):
         """A +31° club AoA is physically impossible and should be discarded."""
 
@@ -4668,3 +4813,137 @@ class TestHardwareTriggerPlumbing:
                 trigger_type="hardware",
                 sample_rate_ksps=25,
             )
+
+
+class TestBallisticCarryPrecedence:
+    """Finalization is the single writer of carry_spin_adjusted.
+
+    The simulator owns carry whenever it can run; the spin table owns it
+    otherwise. Anything already on the shot is replaced either way.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_finalization(self, monkeypatch):
+        server_module._reset_shot_sequence()
+        monkeypatch.setattr(server_module, "monitor", None)
+        monkeypatch.setattr(server_module, "kld7_vertical", None)
+        monkeypatch.setattr(server_module, "kld7_horizontal", None)
+        monkeypatch.setattr(server_module, "camera_capture_runtime", None)
+        monkeypatch.setattr(server_module, "ball_speed_correction_enabled", False)
+        monkeypatch.setattr(server_module, "calculated_spin_enabled", False)
+        monkeypatch.setattr(server_module, "debug_mode", False)
+        monkeypatch.setattr(server_module, "sim_connectors", [])
+        monkeypatch.setattr(server_module, "get_session_logger", lambda: None)
+        monkeypatch.setattr(server_module.socketio, "emit", lambda *_args, **_kwargs: None)
+        yield
+        _wait_for_shot_finalization_idle()
+
+    @staticmethod
+    def _shot(*, launch_angle: float | None, prefilled_carry: float | None) -> Shot:
+        # Field report, 2026-09-23: a 7-iron where the kiosk showed the 119 yd
+        # spin-table number while the simulator and a commercial launch
+        # monitor both landed near 143 yd.
+        return Shot(
+            ball_speed_mph=104.2,
+            club_speed_mph=83.7,
+            timestamp=datetime(2026, 9, 23, 12, 0, 0),
+            impact_timestamp=100.0,
+            club=ClubType.IRON_7,
+            spin_rpm=5164.0,
+            spin_confidence=0.9,
+            launch_angle_vertical=launch_angle,
+            launch_angle_confidence=0.9 if launch_angle is not None else None,
+            carry_spin_adjusted=prefilled_carry,
+            mode="rolling-buffer",
+        )
+
+    def test_simulator_overrides_prefilled_table_carry(self, monkeypatch):
+        monkeypatch.setattr(server_module, "ballistics_enabled", True)
+        shot = self._shot(launch_angle=19.1, prefilled_carry=119.2)
+
+        server_module._finalize_shot_detected(shot, emit_event="shot")
+
+        expected = server_module.simulate(server_module.resolve_launch(shot)).carry_yards
+        assert shot.carry_spin_adjusted == pytest.approx(expected)
+        assert shot.carry_spin_adjusted != pytest.approx(119.2)
+        assert shot.carry_spin_adjusted > 135.0
+
+    def test_table_fallback_replaces_prefilled_carry_when_ballistics_disabled(self, monkeypatch):
+        monkeypatch.setattr(server_module, "ballistics_enabled", False)
+        shot = self._shot(launch_angle=19.1, prefilled_carry=999.0)
+
+        server_module._finalize_shot_detected(shot, emit_event="shot")
+
+        expected = server_module.estimate_carry_with_spin(
+            104.2, 5164.0, ClubType.IRON_7, club_speed_mph=83.7
+        )
+        assert shot.carry_spin_adjusted == pytest.approx(expected)
+
+    def test_table_fallback_replaces_prefilled_carry_without_launch_angle(self, monkeypatch):
+        monkeypatch.setattr(server_module, "ballistics_enabled", True)
+        monkeypatch.setattr(server_module, "_ensure_user_facing_launch_angles", lambda _shot: None)
+        shot = self._shot(launch_angle=None, prefilled_carry=999.0)
+
+        server_module._finalize_shot_detected(shot, emit_event="shot")
+
+        assert shot.carry_spin_adjusted is not None
+        assert shot.carry_spin_adjusted != pytest.approx(999.0)
+        assert 0 < shot.carry_spin_adjusted < 200
+
+    @pytest.mark.parametrize(
+        ("offset_from_floor", "uses_measured_spin"),
+        [(0.0, True), (-0.01, False)],
+    )
+    def test_table_fallback_spin_gate_matches_monitor_reliability(
+        self, monkeypatch, offset_from_floor, uses_measured_spin
+    ):
+        """The fallback trusts measured spin on the same floor SpinResult.is_reliable uses."""
+        from openflight.launch_monitor import SPIN_CONFIDENCE_RELIABLE
+        from openflight.rolling_buffer.types import SpinResult
+
+        confidence = SPIN_CONFIDENCE_RELIABLE + offset_from_floor
+        assert (
+            SpinResult(spin_rpm=5164, confidence=confidence, snr=10.0, quality="medium").is_reliable
+            is uses_measured_spin
+        )
+
+        monkeypatch.setattr(server_module, "ballistics_enabled", False)
+        shot = self._shot(launch_angle=19.1, prefilled_carry=None)
+        shot.spin_confidence = confidence
+
+        server_module._finalize_shot_detected(shot, emit_event="shot")
+
+        measured = server_module.estimate_carry_with_spin(
+            104.2, 5164.0, ClubType.IRON_7, club_speed_mph=83.7
+        )
+        optimal = server_module.estimate_carry_with_spin(
+            104.2,
+            server_module.get_optimal_spin_for_ball_speed(104.2, ClubType.IRON_7),
+            ClubType.IRON_7,
+            club_speed_mph=83.7,
+        )
+        assert measured != pytest.approx(optimal)
+        expected = measured if uses_measured_spin else optimal
+        assert shot.carry_spin_adjusted == pytest.approx(expected)
+
+    def test_table_fallback_fills_empty_carry(self, monkeypatch):
+        monkeypatch.setattr(server_module, "ballistics_enabled", False)
+        shot = self._shot(launch_angle=19.1, prefilled_carry=None)
+
+        server_module._finalize_shot_detected(shot, emit_event="shot")
+
+        assert shot.carry_spin_adjusted is not None
+        assert shot.carry_spin_adjusted > 0
+
+    def test_simulator_carry_reaches_sim_connectors(self, monkeypatch):
+        monkeypatch.setattr(server_module, "ballistics_enabled", True)
+        forwarded = []
+        monkeypatch.setattr(server_module, "_forward_shot_to_simulators", forwarded.append)
+        shot = self._shot(launch_angle=19.1, prefilled_carry=None)
+
+        server_module._finalize_shot_detected(shot, emit_event="shot")
+
+        assert forwarded == [shot]
+        resolved = server_module.resolve_shot(forwarded[0], server_module.SimPlayerState())
+        assert resolved.carry_yards == pytest.approx(shot.carry_spin_adjusted)
+        assert resolved.carry_yards > 135.0
