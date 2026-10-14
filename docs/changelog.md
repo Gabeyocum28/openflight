@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the two-ray module docstring pointed at flat `docs/*.md` files that
   moved in the docs restructure. A new test scans `src/openflight` for
   `docs/…​.md` references and fails on any that do not exist.
+- **`openflight-cloud` honors `--config`/`--log-dir` before the subcommand.**
+  The subcommand's defaults overwrote options given before it, so
+  `openflight-cloud --log-dir X push` scanned the default session directory.
+  The server's session-end push uses that form, so with a custom `--log-dir`
+  it looked in the wrong place.
 - **Stale doc paths from the docs restructure.** The hardware-help issue
   template and the user-facing messages in `scripts/setup/setup.sh`,
   `setup_kld7_devices.sh`, `capture_kld7_radc.py`, `replay_spin_dechirp.py`,
@@ -75,6 +80,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   full horizontal speed, overstating attack angle on any shot with club path.
 
 ### Added
+- **Bluetooth LE connection for phone apps.** `--ble` (with the optional `ble`
+  extra, `bless==0.3.0` on Linux) advertises one GATT service with a shot and a
+  control characteristic, speaking schema version 2; without BlueZ or the
+  extra, `--ble` logs that Bluetooth is unavailable and the server carries on.
+  Shots carry `event_id`, `shot_number`, profile, `carry_range`,
+  `spin_source`, `launch_angle_confidence`, `final` and `enrichment`;
+  hardware-enriched shots arrive twice, provisional then final, with one
+  `event_id`. Phones also get `club_changed`, `profiles`, `power_status`,
+  `shot_processing`, `session_cleared` and `shot_deleted` events, and can
+  `get_club`, `set_club`, `get_profiles`, `set_active_profile` and
+  `get_power_status` through the same server functions Socket.IO uses. BLE is
+  unauthenticated, so it is read-and-select only: clearing sessions, deleting
+  shots and editing profiles stay on the kiosk. Every club change (kiosk,
+  phone, simulator) is broadcast over Socket.IO and BLE. `hello` reports the
+  schema, features and characteristics. New
+  `scripts/setup/configure_bluetooth.sh` (offered by `setup.sh`) sets
+  `Client = false` under `[GATT]` in `/etc/bluetooth/main.conf`, which stops
+  iPhones being asked to pair every 30 s. `start-kiosk.sh --ble` syncs the
+  `ble` extra and `setup.sh` installs it. Tests run the real publisher against
+  a loopback fake of Bless/BlueZ, and `tests/fixtures/ble_goldens/` holds
+  framed hex goldens for client test suites
+  (`scripts/ble/generate_goldens.py`). See
+  [phone app connection](ios-ble.md). Behaviour changes: Socket.IO `set_club`
+  now ignores `unknown` and a missing club (it used to fall back to driver),
+  and a failed Socket.IO shot emit no longer stops BLE and simulator delivery.
 - **Electron kiosk shell.** `scripts/start-kiosk.sh` now opens the UI in a pinned
   Electron window (`electron@44`) instead of whichever system browser happens to
   be installed. Chromium remains a fallback if Electron is not installed (including
@@ -124,6 +154,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a trigger-frame impact marker. MP4 conversion starts only after a manual
   Replay selection, caches the result beside the raw capture, and reports
   retryable preparation or playback failures without affecting shot results.
+- **Opt-in OPS243 internal hardware trigger.** `--trigger hardware` configures
+  the radar's internal speed trigger with 25 mph, magnitude 25, and the tested
+  `S#6` split at 30 ksps. Captures are parsed and the radar is re-armed with
+  `PA` after each dump. The existing sound-trigger default and
+  `--sound-pre-trigger` behavior are unchanged. Hardware mode requires and
+  validates OPS243-A firmware v1.3.2 or newer in the 1.3 release train;
+  firmware v1.3.1 is rejected because of a vendor data-sequence bug. See
+  [OPS243 Internal Hardware Trigger](hardware-trigger.md).
 - **Battery and external-power status for Raspberry Pi UPS boards.** OpenFlight
   can now display charging state and battery percentage, issue dismissible 20%
   and 10% warnings while discharging, and record throttled power telemetry in
